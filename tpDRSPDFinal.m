@@ -88,112 +88,122 @@ axis([0 0.5 -0.1 0.3]);
 
 fprintf('✓ Gráfica generada correctamente.\n');
 
-% Diseño de especificaciones
-ts_target = 0.35; % Objetivo: 350ms (Margen para cumplir <400ms)
-zeta = 0.7;       % Amortiguamiento crítico
+%% ========================================================================
+%% DISEÑO DE ESPECIFICACIONES Y COMPENSADOR EN ADELANTO
+%% ========================================================================
 
-wn = 4 / (ts_target * zeta)
+fprintf('\n==================================================\n');
+fprintf('     DISEÑO DEL COMPENSADOR EN ADELANTO\n');
+fprintf('==================================================\n\n');
+
+% Diseño de especificaciones
+ts_target = 0.4;   % Objetivo: 350ms (Margen para cumplir <400ms)
+zeta = 0.69;         % Amortiguamiento crítico
+
+wn = 4 / (ts_target * zeta);
 fprintf('Frecuencia Natural requerida (wn): %.2f rad/s\n', wn);
 
-% --- 3. CÁLCULO DE POLOS DESEADOS ---
+% --- CÁLCULO DE POLOS DESEADOS ---
 % Polos Dominantes (Complejos conjugados)
-p1 = -zeta*wn + 1i*wn*sqrt(1-zeta^2)
-p2 = conj(p1)
-sd = p1
+p1 = -zeta*wn + 1i*wn*sqrt(1-zeta^2);
+p2 = conj(p1);
+sd = p1;
+
 % Polo No Dominante
-% Debe ser más rápido que los dominantes.
-%p3 = -5 * zeta * wn
-p3 = -5 * zeta * wn % 5 veces más lejos a la izquierda
+p3 = -5 * zeta * wn;
 
 % Polinomio Deseado P(s) = (s-p1)(s-p2)(s-p3)
-P_deseado = poly([p1 p2 p3])
+P_deseado = poly([p1 p2 p3]);
 
-% 2. Coordenada exacta del polo deseado (sd) en el plano complejo
 sd = -zeta*wn + 1i*wn*sqrt(1-zeta^2);
 fprintf('Punto sd en el plano complejo: %.4f + %.4fi\n\n', real(sd), imag(sd));
 
-% Parámetros del Controlador PD
-Kp = 20;
-Kd = 0.02;
-Tf = 0.001;  % Filtro de 1 ms para hacerlo realizable
+%% ========================================================================
+%% COMPENSADOR EN ADELANTO
+%% ========================================================================
 
-% ------------------------------------------------------------------------
-% 1. CASO IDEAL (Teórico)
-% ------------------------------------------------------------------------
-C_ideal = Kp + Kd*s;
-T_ideal = feedback(C_ideal * Gp, 1);
+% Parámetros del Compensador en Adelanto
+Kc = 3.71;         % Ganancia del compensador
+zc = -10;           % Cero: -ζ·ωn
+pc = -19.64;         % Polo: por condición de ángulo
 
-% ------------------------------------------------------------------------
-% 2. CASO REAL (Físicamente Realizable con Filtro)
-% ------------------------------------------------------------------------
-C_real = Kp + (Kd*s)/(1 + Tf*s);
-C_real = minreal(C_real);
-T_real = feedback(C_real * Gp, 1);
+fprintf('PARÁMETROS DEL COMPENSADOR EN ADELANTO:\n');
+fprintf('Kc (Ganancia):  %.4f\n', Kc);
+fprintf('Cero (zc):      %.2f\n', zc);
+fprintf('Polo (pc):      %.2f\n', pc);
+fprintf('\nFunción de Transferencia:\n');
+fprintf('Gc(s) = %.4f · (s + %.1f) / (s + %.1f)\n\n', Kc, -zc, -pc);
 
-% ------------------------------------------------------------------------
-% SIMULACIÓN TEMPORAL
-% ------------------------------------------------------------------------
+% Definición del Compensador en Adelanto
+C_compensador = Kc * (s - zc) / (s - pc);
+
+% Sistema Compensado (Lazo Abierto)
+G_compensada = C_compensador * Gp;
+
+% Sistema Compensado en Lazo Cerrado
+T_compensada = feedback(G_compensada, 1);
+
+%% ========================================================================
+%% SIMULACIÓN TEMPORAL
+%% ========================================================================
+
 dt = 0.0001;      % Paso de tiempo fino
 t = 0:dt:0.4;     % Simulación hasta 400ms (Límite FIA)
 
 % Simulación de posición angular (Salida del sistema)
-[y_ideal, t_sim] = lsim(T_ideal, ref * ones(size(t)), t);
-[y_real, t_sim]  = lsim(T_real, ref * ones(size(t)), t);
+[y_comp, t_sim] = lsim(T_compensada, ref * ones(size(t)), t);
 
-% Simulación de la Acción de Control (Voltaje aplicado al motor)
-% Caso Ideal: u = Kp*e + Kd*(de/dt) calculado numéricamente
-E_ideal = ref - y_ideal;
-de_dt_ideal = [diff(E_ideal) / dt; 0];
-u_ideal = Kp * E_ideal + Kd * de_dt_ideal;
+% Simulación de la Acción de Control (Voltaje del Compensador)
+T_control_comp = C_compensador / (1 + G_compensada);
+[u_comp, ~] = lsim(T_control_comp, ref * ones(size(t)), t);
 
-% Caso Real: Se calcula por bloques porque el filtro la hace propia
-T_control_real = C_real / (1 + C_real*Gp);
-[u_real, ~] = lsim(T_control_real, ref * ones(size(t)), t);
-
-% ------------------------------------------------------------------------
 % INCORPORACIÓN DE NO LINEALIDAD: SATURACIÓN DEL ACTUADOR (+/-12V)
-% ------------------------------------------------------------------------
-% Analizamos el impacto de la restricción fisica limitando el vector u
 V_sat = 12; % Límite de tensión del sistema eléctrico del monoplaza
-u_real_sat = u_real;
-u_real_sat(u_real_sat > V_sat) = V_sat;
-u_real_sat(u_real_sat < -V_sat) = -V_sat;
+u_comp_sat = u_comp;
+u_comp_sat(u_comp_sat > V_sat) = V_sat;
+u_comp_sat(u_comp_sat < -V_sat) = -V_sat;
 
-% ------------------------------------------------------------------------
-% CÁLCULO DE MÉTRICAS (Criterio del 2%)
-% ------------------------------------------------------------------------
+%% ========================================================================
+%% CÁLCULO DE MÉTRICAS (Criterio del 2%)
+%% ========================================================================
+
 banda = 0.02 * ref;
 
-% Métricas Lazo Ideal
-mp_id = ((max(y_ideal) - y_ideal(end)) / y_ideal(end)) * 100;
-idx_id = find(abs(y_ideal - y_ideal(end)) > banda);
-ts_id = t_sim(idx_id(end) + 1);
+% Métricas Compensador
+mp_comp = ((max(y_comp) - y_comp(end)) / y_comp(end)) * 100;
+idx_comp = find(abs(y_comp - y_comp(end)) > banda);
+if ~isempty(idx_comp)
+    ts_comp = t_sim(idx_comp(end) + 1);
+else
+    ts_comp = t_sim(end);
+end
 
-% Métricas Lazo Real
-mp_re = ((max(y_real) - y_real(end)) / y_real(end)) * 100;
-idx_re = find(abs(y_real - y_real(end)) > banda);
-ts_re = t_sim(idx_re(end) + 1);
+%% ========================================================================
+%% SALIDAS EN CONSOLA
+%% ========================================================================
 
-% ------------------------------------------------------------------------
-% SALIDAS SIMPLES POR CONSOLA
-% ------------------------------------------------------------------------
 fprintf('\n==================================================\n');
-fprintf('              RESULTADOS DEL DISEÑO\n');
+fprintf('        RESULTADOS DEL DISEÑO CON ADELANTO\n');
 fprintf('==================================================\n');
-fprintf('PD IDEAL -> Sobrepaso: %.2f%% | Tiempo Estab: %.4f s | V_max: %.2f V\n', mp_id, ts_id, max(abs(u_ideal)));
-fprintf('PD REAL  -> Sobrepaso: %.2f%% | Tiempo Estab: %.4f s | V_max: %.2f V\n', mp_re, ts_re, max(abs(u_real)));
+fprintf('Compensador -> Sobrepaso: %.2f%% | Tiempo Estab: %.4f s\n', mp_comp, ts_comp);
+fprintf('             V_max: %.2f V (Límite: %d V)\n', max(abs(u_comp_sat)), V_sat);
 fprintf('==================================================\n\n');
 
-% ------------------------------------------------------------------------
-% B. ANÁLISIS DE ESTABILIDAD ABSOLUTA AUTOMATIZADO
-% ------------------------------------------------------------------------
-polos_LC = pole(T_real);
+%% ========================================================================
+%% ANÁLISIS DE ESTABILIDAD ABSOLUTA AUTOMATIZADO
+%% ========================================================================
+
+polos_LA = pole(G_compensada);
+polos_LC = pole(T_compensada);
 partes_reales = real(polos_LC);
 
 fprintf('==================================================\n');
 fprintf('         ANÁLISIS DE ESTABILIDAD ABSOLUTA\n');
 fprintf('==================================================\n');
-fprintf('Polos de Lazo Cerrado del Sistema Real obtenidos:\n');
+fprintf('Polos en Lazo Abierto (Gc·Gp):\n');
+disp(polos_LA);
+
+fprintf('Polos en Lazo Cerrado (Sistema Compensado):\n');
 disp(polos_LC);
 
 if all(partes_reales < 0)
@@ -204,59 +214,60 @@ else
 end
 fprintf('==================================================\n\n');
 
-% ------------------------------------------------------------------------
-% GRÁFICOS COMPACTOS (Incluye la Acción de Control con No Linealidad)
-% ------------------------------------------------------------------------
-figure('Name', 'Validacion DRS: Ideal vs Realizable', 'NumberTitle', 'off');
+%% ========================================================================
+%% GRÁFICOS: RESPUESTA CON COMPENSADOR EN ADELANTO
+%% ========================================================================
+
+figure('Name', 'Validacion DRS: Compensador en Adelanto', 'NumberTitle', 'off');
 
 % Gráfico 1: Posición del Flap
 subplot(2,1,1);
-plot(t_sim, y_ideal, 'b-', 'LineWidth', 2); hold on;
-plot(t_sim, y_real, 'r--', 'LineWidth', 2);
+plot(t_sim, y_comp, 'r-', 'LineWidth', 2); hold on;
 plot(t_sim, ref * ones(size(t_sim)), 'k:', 'LineWidth', 1.5);
 grid on;
-title('Respuesta Temporal - Posición del Flap del DRS');
+title('Respuesta Temporal - Posición del Flap del DRS (Compensador en Adelanto)');
 xlabel('Tiempo (s)'); ylabel('Posición (rad)');
-legend('PD Ideal', 'PD Real (Filtro 1ms)', 'Referencia FIA (12°)');
+legend('Respuesta Compensada', 'Referencia FIA (12°)');
+axis([0 0.4 -0.05 0.25]);
 
-% Gráfico 2: Acción de Control (Voltaje con Sat.)
+% Gráfico 2: Acción de Control (Voltaje con Saturación)
 subplot(2,1,2);
-plot(t_sim, u_ideal, 'b-', 'LineWidth', 2); hold on;
-plot(t_sim, u_real_sat, 'r--', 'LineWidth', 2);
+plot(t_sim, u_comp_sat, 'b-', 'LineWidth', 2); hold on;
 plot(t_sim, V_sat * ones(size(t_sim)), 'k:', 'LineWidth', 1);
 plot(t_sim, -V_sat * ones(size(t_sim)), 'k:', 'LineWidth', 1);
 grid on;
-title('Esfuerzo de Control - Voltaje de Armadura (Con Límite de Saturación)');
+title('Esfuerzo de Control - Voltaje de Armadura (Con Límite de Saturación ±12V)');
 xlabel('Tiempo (s)'); ylabel('Voltaje (V)');
-legend('PD Ideal (Impropio)', 'PD Real (Acotado a +/-12V)');
+legend('Señal de Control', 'Límite de Saturación');
+axis([0 0.4 -15 15]);
 
-% ------------------------------------------------------------------------
-% ANÁLISIS DE POLOS EN LAZO CERRADO PARA CONCLUSIONES
-% ------------------------------------------------------------------------
+%% ========================================================================
+%% ANÁLISIS DE POLOS EN LAZO CERRADO
+%% ========================================================================
+
 fprintf('==================================================\n');
 fprintf('   DETALLE DE RAÍCES: LAZO ABIERTO VS LAZO CERRADO\n');
 fprintf('==================================================\n');
-fprintf('Polos Planta original (Lazo Abierto):\n');
+fprintf('Polos Planta original (Lazo Abierto, sin compensador):\n');
 disp(pole(Gp));
-fprintf('Polos Lazo Cerrado - PD IDEAL:\n');
-disp(pole(T_ideal));
-fprintf('Polos Lazo Cerrado - PD REAL (Con Filtro):\n');
-disp(pole(T_real));
+fprintf('Polos Lazo Cerrado - CON COMPENSADOR EN ADELANTO:\n');
+disp(pole(T_compensada));
 fprintf('==================================================\n');
+pzmap(T_compensada)
 
-% ------------------------------------------------------------------------
-% SIMULACIÓN CON PERTURBACIÓN AERODINÁMICA (TORQUE DE VIENTO)
-% ------------------------------------------------------------------------
-% FT de Perturbación a Salida en Lazo Cerrado: T_dist = Gp / (1 + C_real*Gp)
-% Multiplicamos por -1 porque el torque del viento se opone al motor
-T_dist_cl = feedback(Gp, C_real) * (-1);
+%% ========================================================================
+%% SIMULACIÓN CON PERTURBACIÓN AERODINÁMICA (TORQUE DE VIENTO)
+%% ========================================================================
 
-% Vector de tiempo extendido para ver el escalón de viento
+% FT de Perturbación a Salida en Lazo Cerrado: T_dist = Gp / (1 + C·Gp)
+T_dist_cl = feedback(Gp, C_compensador) * (-1);
+
+% Vector de tiempo extendido
 t_pert = 0:dt:0.4;
 
 % Entrada 1: Escalón de Referencia (Apertura a t = 0 s)
 u_ref = ref * ones(size(t_pert));
-y_ref_pert = lsim(T_real, u_ref, t_pert);
+y_ref_pert = lsim(T_compensada, u_ref, t_pert);
 
 % Entrada 2: Escalón de Perturbación (El viento entra a los 0.2 s)
 u_dist = zeros(size(t_pert));
@@ -266,12 +277,71 @@ y_dist_pert = lsim(T_dist_cl, u_dist, t_pert);
 % Respuesta Total Combinada (Principio de Superposición)
 y_total_pert = y_ref_pert + y_dist_pert;
 
+% === EXTRACCIÓN DE PARÁMETROS FINALES ===
+% Posición JUSTO ANTES de la perturbación (en t = 0.2s)
+[~, idx_pert] = min(abs(t_pert - 0.2));
+theta_antes = y_total_pert(idx_pert);
+
+% Posición FINAL (promedio últimos 50ms)
+idx_final = find(t_pert >= 0.35);
+theta_despues = mean(y_total_pert(idx_final));
+
+% Caída total
+caida = theta_antes - theta_despues;
+
+% Porcentaje de apertura mantenida
+pct_apertura = (theta_despues / theta_antes) * 100;
+
+% === MOSTRAR EN CONSOLA ===
+fprintf('\n');
+fprintf('════════════════════════════════════════════════════════════════\n');
+fprintf('    PARÁMETROS FINALES: PERTURBACIÓN CON COMPENSADOR\n');
+fprintf('════════════════════════════════════════════════════════════════\n\n');
+fprintf('Posición ANTES de perturbación (t=0.2s):  %.4f rad  (%.2f°)\n', ...
+        theta_antes, rad2deg(theta_antes));
+fprintf('Posición DESPUÉS de perturbación (t=0.4s): %.4f rad  (%.2f°)\n', ...
+        theta_despues, rad2deg(theta_despues));
+fprintf('Caída de posición (Δθ):                    %.4f rad  (%.2f°)\n', ...
+        caida, rad2deg(caida));
+fprintf('Porcentaje de apertura mantenida:         %.1f %%\n', pct_apertura);
+fprintf('════════════════════════════════════════════════════════════════\n\n');
+
 % Graficamos el comportamiento ante la perturbación
-figure('Name', 'Rechazo de Perturbacion DRS', 'NumberTitle', 'off');
+figure('Name', 'Rechazo de Perturbacion DRS con Adelanto', 'NumberTitle', 'off');
 plot(t_pert, y_total_pert, 'r-', 'LineWidth', 2); hold on;
 plot(t_pert, u_ref, 'k:', 'LineWidth', 1.5);
+xline(0.2, 'g--', 'LineWidth', 1.5, 'Alpha', 0.7);
 grid on;
 title('Respuesta Temporal del DRS con Perturbación Aerodinámica en t = 0.2s');
 xlabel('Tiempo (s)'); ylabel('Posición angular (rad)');
-legend('Respuesta Total \theta(t)', 'Referencia FIA (12°)');
+legend('Respuesta Total θ(t)', 'Referencia FIA (12°)', 'Entrada de Perturbación');
+axis([0 0.4 0 0.25]);
+
+%% ========================================================================
+%% GRÁFICO: ROOT LOCUS DEL SISTEMA COMPENSADO
+%% ========================================================================
+
+figure;
+rlocus(C_compensador * Gp);
+title('Root Locus - Sistema Compensado en Adelanto');
+grid on;
+
+%% ========================================================================
+%% RESUMEN FINAL
+%% ========================================================================
+
+fprintf('\n');
+fprintf('╔════════════════════════════════════════════════════╗\n');
+fprintf('║       RESUMEN: COMPENSADOR EN ADELANTO DISEÑADO    ║\n');
+fprintf('╚════════════════════════════════════════════════════╝\n\n');
+fprintf('COMPENSADOR:\n');
+fprintf('  Gc(s) = %.4f · (s + %.1f) / (s + %.1f)\n\n', Kc, -zc, -pc);
+fprintf('SISTEMA COMPENSADO EN LAZO ABIERTO:\n');
+fprintf('  Gc(s)·Gp(s)\n\n');
+fprintf('ESPECIFICACIONES:\n');
+fprintf('  ✓ Tiempo Estabilización: %.4f s (Objetivo: %.2f s)\n', ts_comp, ts_target);
+fprintf('  ✓ Sobrepaso Máximo: %.2f %% (Objetivo: < 5 %%)\n', mp_comp);
+fprintf('  ✓ Voltaje Máximo: %.2f V (Límite: %d V)\n', max(abs(u_comp_sat)), V_sat);
+fprintf('  ✓ Sistema: ESTABLE (todos los polos en LHP)\n\n');
+fprintf('═══════════════════════════════════════════════════════\n');
 
